@@ -36,6 +36,10 @@ typedef struct json_lexer {
     char ch;
 } json_lexer;
 
+int json_lexer_init(json_lexer *lexer, const char *buffer, unsigned int buffer_len);
+int json_lexer_next(json_lexer *lexer, json_token *token);
+void json_lexer_free(json_lexer *lexer);
+
 static char json_lexer_peek(json_lexer *lexer) {
     if (lexer->read_pos >= lexer->buffer_len) {
         return EOF;
@@ -59,10 +63,6 @@ static void json_lexer_skip_whitespace(json_lexer *lexer) {
     }
 }
 
-int json_lexer_init(json_lexer *lexer, const char *buffer, unsigned int buffer_len);
-json_token json_lexer_next(json_lexer *lexer);
-void json_lexer_free(json_lexer *lexer);
-
 int json_lexer_init(json_lexer *lexer, const char *buffer, unsigned int buffer_len) {
     lexer->buffer = buffer;
     lexer->buffer_len = buffer_len;
@@ -75,63 +75,172 @@ int json_lexer_init(json_lexer *lexer, const char *buffer, unsigned int buffer_l
     return 0;
 }
 
-static json_token json_lexer_literal_to_token(char *literal) {
-    if (strcmp(literal, "null") == 0) {
-        return (json_token){.kind = JSON_TOKEN_NULL, .value = NULL };
-    } else if (strcmp(literal, "true") == 0 || strcmp(literal, "false") == 0) {
-        return (json_token){.kind = JSON_TOKEN_BOOLEAN, .value = literal };
-    } else {
-        return (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = literal };
+static int json_lexer_tokenize_string(json_lexer *lexer, json_token *token) {
+    int result = 0;
+    unsigned int position = lexer->pos;
+    char *value = NULL;
+
+    if (lexer->ch != '"') {
+        DS_LOG_ERROR("The given buffer is not a string: expected '\"' but got '%c'", lexer->ch);
+        return_defer(1);
     }
+
+    json_lexer_read(lexer);
+
+    ds_string_slice slice = { .str = (char *)lexer->buffer + lexer->pos, .len = 0 };
+    while (lexer->ch != '"') {
+        char ch = lexer->ch;
+        slice.len += 1;
+        json_lexer_read(lexer);
+
+        if (ch == '\\' && lexer->ch == '"') {
+            slice.len += 1;
+            json_lexer_read(lexer);
+        }
+    }
+
+    json_lexer_read(lexer);
+
+    if (ds_string_slice_to_owned(&slice, &value) != 0) {
+        DS_LOG_ERROR("Could not allocate string");
+        return_defer(1);
+    }
+
+    *token = (json_token){.kind = JSON_TOKEN_STRING, .value = value, .pos = position };
+
+defer:
+    return result;
 }
 
-json_token json_lexer_next(json_lexer *lexer) {
+static int json_lexer_tokenize_ident(json_lexer *lexer, json_token *token) {
+    int result = 0;
+    unsigned int position = lexer->pos;
+    char *value = NULL;
+
+    if (!islower(lexer->ch)) {
+        DS_LOG_ERROR("The given buffer is not an ident: expected islower but got '%c'", lexer->ch);
+        return_defer(1);
+    }
+
+    ds_string_slice slice = { .str = (char *)lexer->buffer + lexer->pos, .len = 0 };
+    while (islower(lexer->ch)) {
+        slice.len += 1;
+        json_lexer_read(lexer);
+    }
+
+    if (ds_string_slice_to_owned(&slice, &value) != 0) {
+        DS_LOG_ERROR("Could not allocate string");
+        return_defer(1);
+    }
+
+    if (strcmp(value, "null") == 0) {
+        *token = (json_token){.kind = JSON_TOKEN_NULL, .value = NULL, .pos = position };
+        DS_FREE(NULL, value);
+    } else if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0) {
+        *token = (json_token){.kind = JSON_TOKEN_BOOLEAN, .value = value, .pos = position };
+    } else {
+        *token = (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = value, .pos = position };
+    }
+
+defer:
+    return result;
+}
+
+static int json_lexer_tokenize_number(json_lexer *lexer, json_token *token) {
+    int result = 0;
+    unsigned int position = lexer->pos;
+    char *value = NULL;
+
+    int found_dot = 0;
+
+    if (!(isdigit(lexer->ch) || lexer->ch == '.' || lexer->ch == '-')) {
+        DS_LOG_ERROR("The given buffer is not an number: expected digit, '.' or '-' but got '%c'", lexer->ch);
+        return_defer(1);
+    }
+
+    ds_string_slice slice = { .str = (char *)lexer->buffer + lexer->pos, .len = 0 };
+
+    if (lexer->ch == '-') {
+        slice.len += 1;
+        json_lexer_read(lexer);
+    }
+
+    while (isdigit(lexer->ch) || (lexer->ch == '.' && found_dot == 0)) {
+        if (lexer->ch == '.') {
+            found_dot = 1;
+        }
+
+        slice.len += 1;
+        json_lexer_read(lexer);
+    }
+
+    if (ds_string_slice_to_owned(&slice, &value) != 0) {
+        DS_LOG_ERROR("Could not allocate string");
+        return_defer(1);
+    }
+
+    *token = (json_token){.kind = JSON_TOKEN_NUMBER, .value = value, .pos = position };
+
+defer:
+    return result;
+}
+
+int json_lexer_next(json_lexer *lexer, json_token *token) {
+    int result = 0;
     json_lexer_skip_whitespace(lexer);
 
     unsigned int position = lexer->pos;
     if (lexer->ch == EOF) {
         json_lexer_read(lexer);
-        return (json_token){.kind = JSON_TOKEN_EOF, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_EOF, .value = NULL, .pos = position };
+        return_defer(0);
     } else if (lexer->ch == '{') {
         json_lexer_read(lexer);
-        return (json_token){.kind = JSON_TOKEN_LSQRLY, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_LSQRLY, .value = NULL, .pos = position };
+        return_defer(0);
     } else if (lexer->ch == '}') {
         json_lexer_read(lexer);
-        return (json_token){.kind = JSON_TOKEN_RSQRLY, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_RSQRLY, .value = NULL, .pos = position };
+        return_defer(0);
     } else if (lexer->ch == '[') {
         json_lexer_read(lexer);
-        return (json_token){.kind = JSON_TOKEN_LBRACE, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_LBRACE, .value = NULL, .pos = position };
+        return_defer(0);
     } else if (lexer->ch == ']') {
         json_lexer_read(lexer);
-        return (json_token){.kind = JSON_TOKEN_RBRACE, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_RBRACE, .value = NULL, .pos = position };
+        return_defer(0);
     } else if (lexer->ch == ':') {
         json_lexer_read(lexer);
-        return (json_token){.kind = JSON_TOKEN_COLON, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_COLON, .value = NULL, .pos = position };
+        return_defer(0);
     } else if (lexer->ch == ',') {
         json_lexer_read(lexer);
-        return (json_token){.kind = JSON_TOKEN_COMMA, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_COMMA, .value = NULL, .pos = position };
+        return_defer(0);
+    } else if (lexer->ch == '"') {
+        return_defer(json_lexer_tokenize_string(lexer, token));
     } else if (islower(lexer->ch)) {
-        char *value = NULL;
-        ds_string_slice slice = { .str = (char *)lexer->buffer + lexer->pos, .len = 0 };
-        while (islower(lexer->ch)) {
-            slice.len += 1;
-            json_lexer_read(lexer);
-        }
-        // TODO: can fail
-        ds_string_slice_to_owned(&slice, &value);
-
-        json_token t = json_lexer_literal_to_token(value);
-        t.pos = position;
-
-        return t;
+        return_defer(json_lexer_tokenize_ident(lexer, token));
+    } else if (isdigit(lexer->ch) || lexer->ch == '.' || lexer->ch == '-') {
+        return_defer(json_lexer_tokenize_number(lexer, token));
     } else {
         char *value = NULL;
         ds_string_slice slice = { .str = (char *)lexer->buffer + lexer->pos, .len = 1 };
-        // TODO: can fail
-        ds_string_slice_to_owned(&slice, &value);
+
         json_lexer_read(lexer);
-        return (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = value, .pos = position };
+
+        if (ds_string_slice_to_owned(&slice, &value) != 0) {
+            DS_LOG_ERROR("Could not allocate string");
+            return_defer(1);
+        }
+
+        *token = (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = value, .pos = position };
+        return_defer(0);
     }
+
+defer:
+    return result;
 }
 
 void json_lexer_free(json_lexer *lexer) {
@@ -177,7 +286,7 @@ int main(int argc, char **argv) {
 
     json_lexer_init(&lexer, buffer, buffer_len);
     do {
-        token = json_lexer_next(&lexer);
+        json_lexer_next(&lexer, &token);
         switch (token.kind) {
         case JSON_TOKEN_LBRACE: printf("T[\n");break;
         case JSON_TOKEN_RBRACE:printf("T]\n");break;
@@ -186,13 +295,15 @@ int main(int argc, char **argv) {
         case JSON_TOKEN_COLON:printf("T:\n");break;
         case JSON_TOKEN_COMMA:printf("T,\n");break;
         case JSON_TOKEN_BOOLEAN:printf("Tboolean: %s\n", token.value);break;
-        case JSON_TOKEN_NUMBER:printf("Tnumber\n");break;
-        case JSON_TOKEN_STRING:printf("Tstring\n");break;
+        case JSON_TOKEN_NUMBER:printf("Tnumber: %s\n", token.value);break;
+        case JSON_TOKEN_STRING:printf("Tstring: %s\n", token.value);break;
         case JSON_TOKEN_NULL:printf("Tnull\n");break;
         case JSON_TOKEN_EOF:printf("Teof\n");break;
         case JSON_TOKEN_ILLEGAL:printf("Tillegal: %s\n", token.value);break;
           break;
         }
+
+        if (token.value != NULL) DS_FREE(NULL, (void *)token.value);
     } while (token.kind != JSON_TOKEN_EOF);
 
 defer:
