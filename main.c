@@ -26,9 +26,26 @@ typedef enum json_token_kind {
     JSON_TOKEN_ILLEGAL,
 } json_token_kind;
 
+const char* json_token_kind_to_string(json_token_kind kind) {
+    switch (kind) {
+    case JSON_TOKEN_LBRACE: return "[";
+    case JSON_TOKEN_RBRACE: return "]";
+    case JSON_TOKEN_LSQRLY: return "{";
+    case JSON_TOKEN_RSQRLY: return "}";
+    case JSON_TOKEN_COLON: return ":";
+    case JSON_TOKEN_COMMA: return ",";
+    case JSON_TOKEN_BOOLEAN: return "boolean";
+    case JSON_TOKEN_NUMBER: return "number";
+    case JSON_TOKEN_STRING: return "string";
+    case JSON_TOKEN_NULL: return "null";
+    case JSON_TOKEN_EOF: return "<EOF>";
+    case JSON_TOKEN_ILLEGAL: return "ILLEGAL";
+    }
+}
+
 typedef struct json_token {
     json_token_kind kind;
-    const char *value;
+    char *value;
     unsigned int pos;
 } json_token;
 
@@ -43,6 +60,7 @@ typedef struct json_lexer {
 int json_lexer_init(json_lexer *lexer, const char *buffer, unsigned int buffer_len);
 int json_lexer_peek(json_lexer *lexer, json_token *token);
 int json_lexer_next(json_lexer *lexer, json_token *token);
+int json_lexer_pos_to_lc(json_lexer *lexer, int pos, int *line, int *column);
 void json_lexer_free(json_lexer *lexer);
 
 static char json_lexer_peek_ch(json_lexer *lexer) {
@@ -86,7 +104,7 @@ static int json_lexer_tokenize_string(json_lexer *lexer, json_token *token) {
     char *value = NULL;
 
     if (lexer->ch != '"') {
-        DS_LOG_ERROR("The given buffer is not a string: expected '\"' but got '%c'", lexer->ch);
+        DS_LOG_ERROR("Failed to parse string: expected '\"' but got '%c'", lexer->ch);
         return_defer(1);
     }
 
@@ -107,7 +125,7 @@ static int json_lexer_tokenize_string(json_lexer *lexer, json_token *token) {
     json_lexer_read(lexer);
 
     if (ds_string_slice_to_owned(&slice, &value) != 0) {
-        DS_LOG_ERROR("Could not allocate string");
+        DS_LOG_ERROR("Failed to allocate string");
         return_defer(1);
     }
 
@@ -123,7 +141,7 @@ static int json_lexer_tokenize_ident(json_lexer *lexer, json_token *token) {
     char *value = NULL;
 
     if (!islower(lexer->ch)) {
-        DS_LOG_ERROR("The given buffer is not an ident: expected islower but got '%c'", lexer->ch);
+        DS_LOG_ERROR("Failed to parse ident: expected islower but got '%c'", lexer->ch);
         return_defer(1);
     }
 
@@ -134,7 +152,7 @@ static int json_lexer_tokenize_ident(json_lexer *lexer, json_token *token) {
     }
 
     if (ds_string_slice_to_owned(&slice, &value) != 0) {
-        DS_LOG_ERROR("Could not allocate string");
+        DS_LOG_ERROR("Failed to allocate string");
         return_defer(1);
     }
 
@@ -159,7 +177,7 @@ static int json_lexer_tokenize_number(json_lexer *lexer, json_token *token) {
     int found_dot = 0;
 
     if (!(isdigit(lexer->ch) || lexer->ch == '.' || lexer->ch == '-')) {
-        DS_LOG_ERROR("The given buffer is not an number: expected digit, '.' or '-' but got '%c'", lexer->ch);
+        DS_LOG_ERROR("Failed to parse number: expected digit, '.' or '-' but got '%c'", lexer->ch);
         return_defer(1);
     }
 
@@ -180,7 +198,7 @@ static int json_lexer_tokenize_number(json_lexer *lexer, json_token *token) {
     }
 
     if (ds_string_slice_to_owned(&slice, &value) != 0) {
-        DS_LOG_ERROR("Could not allocate string");
+        DS_LOG_ERROR("Failed to allocate string");
         return_defer(1);
     }
 
@@ -250,12 +268,32 @@ int json_lexer_next(json_lexer *lexer, json_token *token) {
         json_lexer_read(lexer);
 
         if (ds_string_slice_to_owned(&slice, &value) != 0) {
-            DS_LOG_ERROR("Could not allocate string");
+            DS_LOG_ERROR("Failed to allocate string");
             return_defer(1);
         }
 
         *token = (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = value, .pos = position };
         return_defer(0);
+    }
+
+defer:
+    return result;
+}
+
+int json_lexer_pos_to_lc(json_lexer *lexer, int pos, int *line, int *column) {
+    int result = 0;
+    int n = (pos > lexer->buffer_len) ? lexer->buffer_len : pos;
+
+    *line = 1;
+    *column = 1;
+
+    for (int i = 0; i < n; i++) {
+        if (lexer->buffer[i] == '\n') {
+            *line += 1;
+            *column = 0;
+        } else {
+            *column += 1;
+        }
     }
 
 defer:
@@ -290,6 +328,51 @@ typedef struct json_object {
     };
 } json_object;
 
+#define JSON_OBJECT_DUMP_INDENT 2
+
+int json_object_dump(json_object *object);
+
+static int json_object_dump_indent(json_object *object, int indent) {
+    int result = 0;
+
+    switch (object->kind) {
+    case JSON_OBJECT_STRING:
+        printf("%*s[STRING]: \'%s\'\n", indent, "", object->string);
+        break;
+    case JSON_OBJECT_NUMBER:
+        printf("%*s[NUMBER]: %f\n", indent, "", object->number);
+        break;
+    case JSON_OBJECT_BOOLEAN:
+        printf("%*s[BOOLEAN]: %s\n", indent, "", object->boolean == true ? "true" : "false");
+        break;
+    case JSON_OBJECT_NULL:
+        printf("%*s[NULL]\n", indent, "");
+        break;
+    case JSON_OBJECT_ARRAY:
+        printf("%*s[ARRAY]: [\n", indent, "");
+        for (int i = 0; i < object->array.count; i++) {
+            json_object item = {0};
+            if (ds_dynamic_array_get(&object->array, i, &item) != 0) {
+                return_defer(1);
+            }
+
+            if (json_object_dump_indent(&item, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
+                return_defer(1);
+            }
+        }
+        printf("%*s]\n", indent, "");
+    case JSON_OBJECT_MAP:
+      break;
+    }
+
+defer:
+    return result;
+}
+
+int json_object_dump(json_object *object) {
+    return json_object_dump_indent(object, 0);
+}
+
 typedef struct json_parser {
     json_lexer lexer;
 } json_parser;
@@ -313,7 +396,7 @@ static int json_parser_parse_object(json_parser *parser, json_object *object) {
     json_token token = {0};
 
     if (json_lexer_next(&parser->lexer, &token) != 0) {
-        DS_LOG_ERROR("Could not get the next token");
+        DS_LOG_ERROR("Failed to get the next token");
         return_defer(1);
     }
 
@@ -333,8 +416,9 @@ static int json_parser_parse_object(json_parser *parser, json_object *object) {
     } else if (token.kind == JSON_TOKEN_NULL) {
         object->kind = JSON_OBJECT_NULL;
     } else {
-        // TODO: add mapping from kind to string + show line and column
-        DS_LOG_ERROR("Expected map or array but found %d", token.kind);
+        int line, column;
+        json_lexer_pos_to_lc(&parser->lexer, token.pos, &line, &column);
+        DS_LOG_ERROR("Expected a json object but found %s at %d:%d", json_token_kind_to_string(token.kind), line, column);
         return_defer(1);
     }
 
@@ -359,7 +443,7 @@ static int json_parser_parse_array(json_parser *parser, json_object *object) {
     ds_dynamic_array_init(&object->array, sizeof(json_object));
 
     if (json_lexer_peek(&parser->lexer, &token) != 0) {
-        DS_LOG_ERROR("Could not get the next token");
+        DS_LOG_ERROR("Failed to get the next token");
         return_defer(1);
     }
 
@@ -370,17 +454,17 @@ static int json_parser_parse_array(json_parser *parser, json_object *object) {
     while (token.kind != JSON_TOKEN_RBRACE) {
         json_object item = {0};
         if (json_parser_parse_object(parser, &item) != 0) {
-            DS_LOG_ERROR("Could not parse array item");
+            DS_LOG_ERROR("Failed to parse array item");
             return_defer(1);
         }
 
         if (ds_dynamic_array_append(&object->array, &item) != 0) {
-            DS_LOG_ERROR("Could not add item to array");
+            DS_LOG_ERROR("Failed to add item to array");
             return_defer(1);
         }
 
         if (json_lexer_next(&parser->lexer, &token) != 0) {
-            DS_LOG_ERROR("Could not get the next token");
+            DS_LOG_ERROR("Failed to get the next token");
             return_defer(1);
         }
 
@@ -389,8 +473,9 @@ static int json_parser_parse_array(json_parser *parser, json_object *object) {
         }
 
         if (token.kind != JSON_TOKEN_COMMA) {
-            // TODO: add mapping from kind to string + show line and column
-            DS_LOG_ERROR("Expected a comma but found %d", token.kind);
+            int line, column;
+            json_lexer_pos_to_lc(&parser->lexer, token.pos, &line, &column);
+            DS_LOG_ERROR("Expected a comma but found %s at %d:%d", json_token_kind_to_string(token.kind), line, column);
             return_defer(1);
         }
     }
@@ -403,16 +488,20 @@ int json_parser_parse(json_parser *parser, json_object *object) {
     int result = 0;
     json_token token = {0};
 
-    json_parser_parse_object(parser, object);
+    if (json_parser_parse_object(parser, object) != 0) {
+        DS_LOG_ERROR("Failed to parse json object");
+        return_defer(1);
+    }
 
     if (json_lexer_next(&parser->lexer, &token) != 0) {
-        DS_LOG_ERROR("Could not get the next token");
+        DS_LOG_ERROR("Failed to get the next token");
         return_defer(1);
     }
 
     if (token.kind != JSON_TOKEN_EOF) {
-        // TODO: add mapping from kind to string + show line and column
-        DS_LOG_ERROR("Expected end of file but found %d", token.kind);
+        int line, column;
+        json_lexer_pos_to_lc(&parser->lexer, token.pos, &line, &column);
+        DS_LOG_ERROR("Expected end of file but found %s at %d:%d", json_token_kind_to_string(token.kind), line, column);
         return_defer(1);
     }
 
@@ -421,6 +510,25 @@ defer:
 }
 
 void json_parser_free(json_parser *parser) { }
+
+int json_loads(char *buffer, unsigned int buffer_len, json_object *object) {
+    int result = 0;
+    json_lexer lexer = {0};
+    json_parser parser = {0};
+
+    json_lexer_init(&lexer, buffer, buffer_len);
+    json_parser_init(&parser, lexer);
+
+    if (json_parser_parse(&parser, object) != 0) {
+        DS_LOG_ERROR("Failed to parse json");
+        return_defer(1);
+    }
+
+defer:
+    json_parser_free(&parser);
+    json_lexer_free(&lexer);
+    return result;
+}
 
 static int argparse(int argc, char **argv, char **filename) {
     int result = 0;
@@ -435,12 +543,12 @@ static int argparse(int argc, char **argv, char **filename) {
         .type = ARGUMENT_TYPE_POSITIONAL,
         .required = 0,
     }) != 0) {
-        DS_LOG_ERROR("Could not add argument `input`");
+        DS_LOG_ERROR("Failed to add argument `input`");
         return_defer(1);
     }
 
     if (ds_argparse_parse(&argparser, argc, argv) != 0) {
-        DS_LOG_ERROR("Could not parse arguments");
+        DS_LOG_ERROR("Failed to parse arguments");
         return_defer(1);
     }
 
@@ -456,8 +564,6 @@ int main(int argc, char **argv) {
     char *filename = NULL;
     char *buffer = NULL;
     int buffer_len;
-    json_lexer lexer = {0};
-    json_parser parser = {0};
     json_object object = {0};
 
     if (argparse(argc, argv, &filename) != 0) {
@@ -467,23 +573,25 @@ int main(int argc, char **argv) {
 
     buffer_len = ds_io_read_file(filename, &buffer);
     if (buffer_len < 0) {
-        DS_LOG_ERROR("Could not read from file: %s", (filename == NULL) ? "stdin" : filename);
+        DS_LOG_ERROR("Failed to read from file: %s", (filename == NULL) ? "stdin" : filename);
         return_defer(-1);
     }
 
-    json_lexer_init(&lexer, buffer, buffer_len);
-    json_parser_init(&parser, lexer);
-
-    if (json_parser_parse(&parser, &object) != 0) {
+    if (json_loads(buffer, buffer_len, &object) != 0) {
         DS_LOG_ERROR("Failed to parse json");
         return_defer(1);
     }
 
+    if (json_object_dump(&object) != 0) {
+        DS_LOG_ERROR("Failed to dump json");
+        return_defer(1);
+    }
+
 defer:
-    json_parser_free(&parser);
-    json_lexer_free(&lexer);
     if (buffer != NULL) {
         DS_FREE(NULL, buffer);
     }
     return result;
 }
+
+// TODO: memory management -> for tokens especially

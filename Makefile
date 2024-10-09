@@ -1,5 +1,5 @@
 build:
-	gcc main.c -o main
+	gcc -g main.c -o main
 
 .PHONY: clean
 
