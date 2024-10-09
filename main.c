@@ -330,6 +330,7 @@ typedef struct json_object {
 
 #define JSON_OBJECT_DUMP_INDENT 2
 
+int json_object_load(char *buffer, unsigned int buffer_len, json_object *object);
 int json_object_dump(json_object *object);
 
 static int json_object_dump_indent(json_object *object, int indent) {
@@ -511,7 +512,7 @@ defer:
 
 void json_parser_free(json_parser *parser) { }
 
-int json_loads(char *buffer, unsigned int buffer_len, json_object *object) {
+int json_object_load(char *buffer, unsigned int buffer_len, json_object *object) {
     int result = 0;
     json_lexer lexer = {0};
     json_parser parser = {0};
@@ -577,7 +578,7 @@ int main(int argc, char **argv) {
         return_defer(-1);
     }
 
-    if (json_loads(buffer, buffer_len, &object) != 0) {
+    if (json_object_load(buffer, buffer_len, &object) != 0) {
         DS_LOG_ERROR("Failed to parse json");
         return_defer(1);
     }
