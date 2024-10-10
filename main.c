@@ -45,7 +45,7 @@ const char* json_token_kind_to_string(json_token_kind kind) {
 
 typedef struct json_token {
     json_token_kind kind;
-    char *value;
+    ds_string_slice value;
     unsigned int pos;
 } json_token;
 
@@ -124,12 +124,7 @@ static int json_lexer_tokenize_string(json_lexer *lexer, json_token *token) {
 
     json_lexer_read(lexer);
 
-    if (ds_string_slice_to_owned(&slice, &value) != 0) {
-        DS_LOG_ERROR("Failed to allocate string");
-        return_defer(1);
-    }
-
-    *token = (json_token){.kind = JSON_TOKEN_STRING, .value = value, .pos = position };
+    *token = (json_token){.kind = JSON_TOKEN_STRING, .value = slice, .pos = position };
 
 defer:
     return result;
@@ -157,15 +152,15 @@ static int json_lexer_tokenize_ident(json_lexer *lexer, json_token *token) {
     }
 
     if (strcmp(value, "null") == 0) {
-        *token = (json_token){.kind = JSON_TOKEN_NULL, .value = NULL, .pos = position };
-        DS_FREE(NULL, value);
+        *token = (json_token){.kind = JSON_TOKEN_NULL, .value = 0, .pos = position };
     } else if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0) {
-        *token = (json_token){.kind = JSON_TOKEN_BOOLEAN, .value = value, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_BOOLEAN, .value = slice, .pos = position };
     } else {
-        *token = (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = value, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = slice, .pos = position };
     }
 
 defer:
+    DS_FREE(NULL, value);
     return result;
 }
 
@@ -197,12 +192,7 @@ static int json_lexer_tokenize_number(json_lexer *lexer, json_token *token) {
         json_lexer_read(lexer);
     }
 
-    if (ds_string_slice_to_owned(&slice, &value) != 0) {
-        DS_LOG_ERROR("Failed to allocate string");
-        return_defer(1);
-    }
-
-    *token = (json_token){.kind = JSON_TOKEN_NUMBER, .value = value, .pos = position };
+    *token = (json_token){.kind = JSON_TOKEN_NUMBER, .value = slice, .pos = position };
 
 defer:
     return result;
@@ -229,31 +219,31 @@ int json_lexer_next(json_lexer *lexer, json_token *token) {
     unsigned int position = lexer->pos;
     if (lexer->ch == EOF) {
         json_lexer_read(lexer);
-        *token = (json_token){.kind = JSON_TOKEN_EOF, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_EOF, .value = 0, .pos = position };
         return_defer(0);
     } else if (lexer->ch == '{') {
         json_lexer_read(lexer);
-        *token = (json_token){.kind = JSON_TOKEN_LSQRLY, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_LSQRLY, .value = 0, .pos = position };
         return_defer(0);
     } else if (lexer->ch == '}') {
         json_lexer_read(lexer);
-        *token = (json_token){.kind = JSON_TOKEN_RSQRLY, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_RSQRLY, .value = 0, .pos = position };
         return_defer(0);
     } else if (lexer->ch == '[') {
         json_lexer_read(lexer);
-        *token = (json_token){.kind = JSON_TOKEN_LBRACE, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_LBRACE, .value = 0, .pos = position };
         return_defer(0);
     } else if (lexer->ch == ']') {
         json_lexer_read(lexer);
-        *token = (json_token){.kind = JSON_TOKEN_RBRACE, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_RBRACE, .value = 0, .pos = position };
         return_defer(0);
     } else if (lexer->ch == ':') {
         json_lexer_read(lexer);
-        *token = (json_token){.kind = JSON_TOKEN_COLON, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_COLON, .value = 0, .pos = position };
         return_defer(0);
     } else if (lexer->ch == ',') {
         json_lexer_read(lexer);
-        *token = (json_token){.kind = JSON_TOKEN_COMMA, .value = NULL, .pos = position };
+        *token = (json_token){.kind = JSON_TOKEN_COMMA, .value = 0, .pos = position };
         return_defer(0);
     } else if (lexer->ch == '"') {
         return_defer(json_lexer_tokenize_string(lexer, token));
@@ -267,12 +257,8 @@ int json_lexer_next(json_lexer *lexer, json_token *token) {
 
         json_lexer_read(lexer);
 
-        if (ds_string_slice_to_owned(&slice, &value) != 0) {
-            DS_LOG_ERROR("Failed to allocate string");
-            return_defer(1);
-        }
+        *token = (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = slice, .pos = position };
 
-        *token = (json_token){.kind = JSON_TOKEN_ILLEGAL, .value = value, .pos = position };
         return_defer(0);
     }
 
@@ -320,7 +306,7 @@ typedef enum {
 typedef struct json_object {
     json_object_kind kind;
     union {
-        const char *string;
+        char *string;
         double number;
         bool boolean;
         ds_dynamic_array array; /* json_object */
@@ -346,9 +332,10 @@ static int json_object_compare(const void *k1, const void *k2) {
 }
 
 int json_object_load(char *buffer, unsigned int buffer_len, json_object *object);
-int json_object_dump(json_object *object);
+int json_object_debug(json_object *object);
+int json_object_free(json_object *object);
 
-static int json_object_dump_indent(json_object *object, int indent) {
+static int json_object_debug_indent(json_object *object, int indent) {
     int result = 0;
 
     switch (object->kind) {
@@ -373,7 +360,7 @@ static int json_object_dump_indent(json_object *object, int indent) {
                 return_defer(1);
             }
 
-            if (json_object_dump_indent(&item, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
+            if (json_object_debug_indent(&item, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
                 return_defer(1);
             }
         }
@@ -392,21 +379,76 @@ static int json_object_dump_indent(json_object *object, int indent) {
                 }
 
                 printf("%*s[KEY]: \'%s\'\n", indent, "", (char *)kv.key);
-                if (json_object_dump_indent((json_object*)kv.value, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
+                if (json_object_debug_indent((json_object*)kv.value, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
                     return_defer(1);
                 }
             }
         }
         printf("%*s}\n", indent, "");
-      break;
+        break;
     }
 
 defer:
     return result;
 }
 
-int json_object_dump(json_object *object) {
-    return json_object_dump_indent(object, 0);
+int json_object_debug(json_object *object) {
+    return json_object_debug_indent(object, 0);
+}
+
+int json_object_free(json_object *object) {
+    int result = 0;
+
+    switch (object->kind) {
+    case JSON_OBJECT_STRING:
+        DS_FREE(NULL, object->string);
+        break;
+    case JSON_OBJECT_NUMBER:
+        break;
+    case JSON_OBJECT_BOOLEAN:
+        break;
+    case JSON_OBJECT_NULL:
+        break;
+    case JSON_OBJECT_ARRAY:
+        for (int i = 0; i < object->array.count; i++) {
+            json_object *item = NULL;
+            if (ds_dynamic_array_get_ref(&object->array, i, (void **)&item) != 0) {
+                DS_LOG_ERROR("Failed to get item from array");
+                return_defer(1);
+            }
+
+            if (json_object_free(item) != 0) {
+                DS_LOG_ERROR("Failed to free json object");
+                return_defer(1);
+            }
+        }
+        ds_dynamic_array_free(&object->array);
+        break;
+    case JSON_OBJECT_MAP:
+        for (int i = 0; i < object->map.capacity; i++) {
+            ds_dynamic_array bucket = object->map.buckets[i];
+
+            for (int j = 0; j < bucket.count; j++) {
+                ds_hashmap_kv kv = {0};
+                if (ds_dynamic_array_get(&bucket, j, &kv) != 0) {
+                    DS_LOG_ERROR("Failed to get item from array");
+                    return_defer(1);
+                }
+
+                DS_FREE(NULL, kv.key);
+                if (json_object_free(kv.value) != 0) {
+                    DS_LOG_ERROR("Failed to free json object");
+                    return_defer(1);
+                }
+                DS_FREE(NULL, kv.value);
+            }
+        }
+        ds_hashmap_free(&object->map);
+        break;
+    }
+
+defer:
+    return result;
 }
 
 typedef struct json_parser {
@@ -442,13 +484,28 @@ static int json_parser_parse_object(json_parser *parser, json_object *object) {
         result = json_parser_parse_array(parser, object);
     } else if (token.kind == JSON_TOKEN_STRING) {
         object->kind = JSON_OBJECT_STRING;
-        object->string = token.value;
+        if (ds_string_slice_to_owned(&token.value, &object->string) != 0) {
+            DS_LOG_ERROR("Failed to allocate string");
+            return_defer(1);
+        }
     } else if (token.kind == JSON_TOKEN_NUMBER) {
+        char *value = NULL;
         object->kind = JSON_OBJECT_NUMBER;
-        object->number = atof(token.value);
+        if (ds_string_slice_to_owned(&token.value, &value) != 0) {
+            DS_LOG_ERROR("Failed to allocate string");
+            return_defer(1);
+        }
+        object->number = atof(value);
+        DS_FREE(NULL, value);
     } else if (token.kind == JSON_TOKEN_BOOLEAN) {
+        char *value = NULL;
         object->kind = JSON_OBJECT_BOOLEAN;
-        object->boolean = (strcmp(token.value, "true") == 0) ? true : false;
+        if (ds_string_slice_to_owned(&token.value, &value) != 0) {
+            DS_LOG_ERROR("Failed to allocate string");
+            return_defer(1);
+        }
+        object->boolean = (strcmp(value, "true") == 0) ? true : false;
+        DS_FREE(NULL, value);
     } else if (token.kind == JSON_TOKEN_NULL) {
         object->kind = JSON_OBJECT_NULL;
     } else {
@@ -488,7 +545,10 @@ static int json_parser_parse_map(json_parser *parser, json_object *object) {
             return_defer(1);
         }
 
-        kv.key = token.value;
+        if (ds_string_slice_to_owned(&token.value, (char **)&kv.key) != 0) {
+            DS_LOG_ERROR("Failed to allocate string");
+            return_defer(1);
+        }
 
         if (json_lexer_next(&parser->lexer, &token) != 0) {
             DS_LOG_ERROR("Failed to get the next token");
@@ -691,16 +751,15 @@ int main(int argc, char **argv) {
         return_defer(1);
     }
 
-    if (json_object_dump(&object) != 0) {
+    if (json_object_debug(&object) != 0) {
         DS_LOG_ERROR("Failed to dump json");
         return_defer(1);
     }
 
 defer:
+    json_object_free(&object);
     if (buffer != NULL) {
         DS_FREE(NULL, buffer);
     }
     return result;
 }
-
-// TODO: memory management -> for tokens especially
