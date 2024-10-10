@@ -330,6 +330,21 @@ typedef struct json_object {
 
 #define JSON_OBJECT_DUMP_INDENT 2
 
+#define MAX_CAPACITY 100
+
+static unsigned int json_object_hash(const void *key) {
+    unsigned int hash = 0;
+    char *name = (char *)key;
+    for (unsigned int i = 0; i < strlen(name); i++) {
+        hash = 31 * hash + name[i];
+    }
+    return hash % MAX_CAPACITY;
+}
+
+static int json_object_compare(const void *k1, const void *k2) {
+    return strcmp((char *)k1, (char *)k2);
+}
+
 int json_object_load(char *buffer, unsigned int buffer_len, json_object *object);
 int json_object_dump(json_object *object);
 
@@ -354,6 +369,7 @@ static int json_object_dump_indent(json_object *object, int indent) {
         for (int i = 0; i < object->array.count; i++) {
             json_object item = {0};
             if (ds_dynamic_array_get(&object->array, i, &item) != 0) {
+                DS_LOG_ERROR("Failed to get item from array");
                 return_defer(1);
             }
 
@@ -362,7 +378,26 @@ static int json_object_dump_indent(json_object *object, int indent) {
             }
         }
         printf("%*s]\n", indent, "");
+        break;
     case JSON_OBJECT_MAP:
+        printf("%*s[MAP]: {\n", indent, "");
+        for (int i = 0; i < object->map.capacity; i++) {
+            ds_dynamic_array bucket = object->map.buckets[i];
+
+            for (int j = 0; j < bucket.count; j++) {
+                ds_hashmap_kv kv = {0};
+                if (ds_dynamic_array_get(&bucket, j, &kv) != 0) {
+                    DS_LOG_ERROR("Failed to get item from array");
+                    return_defer(1);
+                }
+
+                printf("%*s[KEY]: \'%s\'\n", indent, "", (char *)kv.key);
+                if (json_object_dump_indent((json_object*)kv.value, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
+                    return_defer(1);
+                }
+            }
+        }
+        printf("%*s}\n", indent, "");
       break;
     }
 
@@ -429,8 +464,81 @@ defer:
 
 static int json_parser_parse_map(json_parser *parser, json_object *object) {
     int result = 0;
+    json_token token = {0};
 
     object->kind = JSON_OBJECT_MAP;
+    ds_hashmap_init(&object->map, MAX_CAPACITY, json_object_hash, json_object_compare);
+
+    if (json_lexer_next(&parser->lexer, &token) != 0) {
+        DS_LOG_ERROR("Failed to get the next token");
+        return_defer(1);
+    }
+
+    if (token.kind == JSON_TOKEN_RSQRLY) {
+        return_defer(0);
+    }
+
+    while (token.kind != JSON_TOKEN_RSQRLY) {
+        ds_hashmap_kv kv = {0};
+
+        if (token.kind != JSON_TOKEN_STRING) {
+            int line, column;
+            json_lexer_pos_to_lc(&parser->lexer, token.pos, &line, &column);
+            DS_LOG_ERROR("Expected a string but found %s at %d:%d", json_token_kind_to_string(token.kind), line, column);
+            return_defer(1);
+        }
+
+        kv.key = token.value;
+
+        if (json_lexer_next(&parser->lexer, &token) != 0) {
+            DS_LOG_ERROR("Failed to get the next token");
+            return_defer(1);
+        }
+
+        if (token.kind != JSON_TOKEN_COLON) {
+            int line, column;
+            json_lexer_pos_to_lc(&parser->lexer, token.pos, &line, &column);
+            DS_LOG_ERROR("Expected a colon but found %s at %d:%d", json_token_kind_to_string(token.kind), line, column);
+            return_defer(1);
+        }
+
+        kv.value = DS_MALLOC(NULL, sizeof(json_object));
+        if (kv.value == NULL) {
+            DS_LOG_ERROR("Failed to allocate value for map");
+            return_defer(1);
+        }
+
+        if (json_parser_parse_object(parser, (json_object *)kv.value) != 0) {
+            DS_LOG_ERROR("Failed to parse map value");
+            return_defer(1);
+        }
+
+        if (ds_hashmap_insert(&object->map, &kv) != 0) {
+            DS_LOG_ERROR("Failed to insert item to map");
+            return_defer(1);
+        }
+
+        if (json_lexer_next(&parser->lexer, &token) != 0) {
+            DS_LOG_ERROR("Failed to get the next token");
+            return_defer(1);
+        }
+
+        if (token.kind == JSON_TOKEN_RSQRLY) {
+            break;
+        }
+
+        if (token.kind != JSON_TOKEN_COMMA) {
+            int line, column;
+            json_lexer_pos_to_lc(&parser->lexer, token.pos, &line, &column);
+            DS_LOG_ERROR("Expected a comma but found %s at %d:%d", json_token_kind_to_string(token.kind), line, column);
+            return_defer(1);
+        }
+
+        if (json_lexer_next(&parser->lexer, &token) != 0) {
+            DS_LOG_ERROR("Failed to get the next token");
+            return_defer(1);
+        }
+    }
 
 defer:
     return result;
