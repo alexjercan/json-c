@@ -7,6 +7,42 @@
 #define DS_DA_IMPLEMENTATION
 #include "ds.h"
 
+/* DEFINITION */
+
+typedef enum {
+    JSON_OBJECT_STRING,
+    JSON_OBJECT_NUMBER,
+    JSON_OBJECT_BOOLEAN,
+    JSON_OBJECT_NULL,
+    JSON_OBJECT_ARRAY,
+    JSON_OBJECT_MAP
+} json_object_kind;
+
+typedef struct json_object {
+    json_object_kind kind;
+    union {
+        char *string;
+        double number;
+        bool boolean;
+        ds_dynamic_array array; /* json_object */
+        ds_hashmap map; /* <char* , json_object> */
+    };
+} json_object;
+
+int json_object_load(char *buffer, unsigned int buffer_len, json_object *object);
+int json_object_debug(json_object *object);
+int json_object_free(json_object *object);
+
+#ifndef JSON_OBJECT_DUMP_INDENT
+#define JSON_OBJECT_DUMP_INDENT 2
+#endif // JSON_OBJECT_DUMP_INDENT
+
+#ifndef JSON_OBJECT_MAP_MAX_CAPACITY
+#define JSON_OBJECT_MAP_MAX_CAPACITY 100
+#endif // JSON_OBJECT_MAP_MAX_CAPACITY
+
+/* PRIVATE */
+
 typedef enum json_token_kind {
     JSON_TOKEN_LBRACE,
     JSON_TOKEN_RBRACE,
@@ -22,7 +58,38 @@ typedef enum json_token_kind {
     JSON_TOKEN_ILLEGAL,
 } json_token_kind;
 
-const char* json_token_kind_to_string(json_token_kind kind) {
+typedef struct json_token {
+    json_token_kind kind;
+    ds_string_slice value;
+    unsigned int pos;
+} json_token;
+
+typedef struct json_lexer {
+    const char *buffer;
+    unsigned int buffer_len;
+    unsigned int pos;
+    unsigned int read_pos;
+    char ch;
+} json_lexer;
+
+typedef struct json_parser {
+    json_lexer lexer;
+} json_parser;
+
+static unsigned int json_object_hash(const void *key) {
+    unsigned int hash = 0;
+    char *name = (char *)key;
+    for (unsigned int i = 0; i < strlen(name); i++) {
+        hash = 31 * hash + name[i];
+    }
+    return hash % JSON_OBJECT_MAP_MAX_CAPACITY;
+}
+
+static int json_object_compare(const void *k1, const void *k2) {
+    return strcmp((char *)k1, (char *)k2);
+}
+
+static const char* json_token_kind_to_string(json_token_kind kind) {
     switch (kind) {
     case JSON_TOKEN_LBRACE: return "[";
     case JSON_TOKEN_RBRACE: return "]";
@@ -38,26 +105,6 @@ const char* json_token_kind_to_string(json_token_kind kind) {
     case JSON_TOKEN_ILLEGAL: return "ILLEGAL";
     }
 }
-
-typedef struct json_token {
-    json_token_kind kind;
-    ds_string_slice value;
-    unsigned int pos;
-} json_token;
-
-typedef struct json_lexer {
-    const char *buffer;
-    unsigned int buffer_len;
-    unsigned int pos;
-    unsigned int read_pos;
-    char ch;
-} json_lexer;
-
-int json_lexer_init(json_lexer *lexer, const char *buffer, unsigned int buffer_len);
-int json_lexer_peek(json_lexer *lexer, json_token *token);
-int json_lexer_next(json_lexer *lexer, json_token *token);
-int json_lexer_pos_to_lc(json_lexer *lexer, int pos, int *line, int *column);
-void json_lexer_free(json_lexer *lexer);
 
 static char json_lexer_peek_ch(json_lexer *lexer) {
     if (lexer->read_pos >= lexer->buffer_len) {
@@ -82,7 +129,7 @@ static void json_lexer_skip_whitespace(json_lexer *lexer) {
     }
 }
 
-int json_lexer_init(json_lexer *lexer, const char *buffer, unsigned int buffer_len) {
+static int json_lexer_init(json_lexer *lexer, const char *buffer, unsigned int buffer_len) {
     lexer->buffer = buffer;
     lexer->buffer_len = buffer_len;
     lexer->pos = 0;
@@ -194,21 +241,7 @@ defer:
     return result;
 }
 
-int json_lexer_peek(json_lexer *lexer, json_token *token) {
-    unsigned int pos = lexer->pos;
-    unsigned int read_pos = lexer->read_pos;
-    unsigned int ch = lexer->ch;
-
-    int result = json_lexer_next(lexer, token);
-
-    lexer->pos = pos;
-    lexer->read_pos = read_pos;
-    lexer->ch = ch;
-
-    return result;
-}
-
-int json_lexer_next(json_lexer *lexer, json_token *token) {
+static int json_lexer_next(json_lexer *lexer, json_token *token) {
     int result = 0;
     json_lexer_skip_whitespace(lexer);
 
@@ -262,7 +295,21 @@ defer:
     return result;
 }
 
-int json_lexer_pos_to_lc(json_lexer *lexer, int pos, int *line, int *column) {
+static int json_lexer_peek(json_lexer *lexer, json_token *token) {
+    unsigned int pos = lexer->pos;
+    unsigned int read_pos = lexer->read_pos;
+    unsigned int ch = lexer->ch;
+
+    int result = json_lexer_next(lexer, token);
+
+    lexer->pos = pos;
+    lexer->read_pos = read_pos;
+    lexer->ch = ch;
+
+    return result;
+}
+
+static int json_lexer_pos_to_lc(json_lexer *lexer, int pos, int *line, int *column) {
     int result = 0;
     int n = (pos > lexer->buffer_len) ? lexer->buffer_len : pos;
 
@@ -282,7 +329,7 @@ defer:
     return result;
 }
 
-void json_lexer_free(json_lexer *lexer) {
+static void json_lexer_free(json_lexer *lexer) {
     lexer->buffer = NULL;
     lexer->buffer_len = 0;
     lexer->pos = 0;
@@ -290,172 +337,7 @@ void json_lexer_free(json_lexer *lexer) {
     lexer->ch = 0;
 }
 
-typedef enum {
-    JSON_OBJECT_STRING,
-    JSON_OBJECT_NUMBER,
-    JSON_OBJECT_BOOLEAN,
-    JSON_OBJECT_NULL,
-    JSON_OBJECT_ARRAY,
-    JSON_OBJECT_MAP
-} json_object_kind;
-
-typedef struct json_object {
-    json_object_kind kind;
-    union {
-        char *string;
-        double number;
-        bool boolean;
-        ds_dynamic_array array; /* json_object */
-        ds_hashmap map; /* <char* , json_object> */
-    };
-} json_object;
-
-#define JSON_OBJECT_DUMP_INDENT 2
-
-#define MAX_CAPACITY 100
-
-static unsigned int json_object_hash(const void *key) {
-    unsigned int hash = 0;
-    char *name = (char *)key;
-    for (unsigned int i = 0; i < strlen(name); i++) {
-        hash = 31 * hash + name[i];
-    }
-    return hash % MAX_CAPACITY;
-}
-
-static int json_object_compare(const void *k1, const void *k2) {
-    return strcmp((char *)k1, (char *)k2);
-}
-
-int json_object_load(char *buffer, unsigned int buffer_len, json_object *object);
-int json_object_debug(json_object *object);
-int json_object_free(json_object *object);
-
-static int json_object_debug_indent(json_object *object, int indent) {
-    int result = 0;
-
-    switch (object->kind) {
-    case JSON_OBJECT_STRING:
-        printf("%*s[STRING]: \'%s\'\n", indent, "", object->string);
-        break;
-    case JSON_OBJECT_NUMBER:
-        printf("%*s[NUMBER]: %f\n", indent, "", object->number);
-        break;
-    case JSON_OBJECT_BOOLEAN:
-        printf("%*s[BOOLEAN]: %s\n", indent, "", object->boolean == true ? "true" : "false");
-        break;
-    case JSON_OBJECT_NULL:
-        printf("%*s[NULL]\n", indent, "");
-        break;
-    case JSON_OBJECT_ARRAY:
-        printf("%*s[ARRAY]: [\n", indent, "");
-        for (int i = 0; i < object->array.count; i++) {
-            json_object item = {0};
-            if (ds_dynamic_array_get(&object->array, i, &item) != 0) {
-                DS_LOG_ERROR("Failed to get item from array");
-                return_defer(1);
-            }
-
-            if (json_object_debug_indent(&item, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
-                return_defer(1);
-            }
-        }
-        printf("%*s]\n", indent, "");
-        break;
-    case JSON_OBJECT_MAP:
-        printf("%*s[MAP]: {\n", indent, "");
-        for (int i = 0; i < object->map.capacity; i++) {
-            ds_dynamic_array bucket = object->map.buckets[i];
-
-            for (int j = 0; j < bucket.count; j++) {
-                ds_hashmap_kv kv = {0};
-                if (ds_dynamic_array_get(&bucket, j, &kv) != 0) {
-                    DS_LOG_ERROR("Failed to get item from array");
-                    return_defer(1);
-                }
-
-                printf("%*s[KEY]: \'%s\'\n", indent, "", (char *)kv.key);
-                if (json_object_debug_indent((json_object*)kv.value, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
-                    return_defer(1);
-                }
-            }
-        }
-        printf("%*s}\n", indent, "");
-        break;
-    }
-
-defer:
-    return result;
-}
-
-int json_object_debug(json_object *object) {
-    return json_object_debug_indent(object, 0);
-}
-
-int json_object_free(json_object *object) {
-    int result = 0;
-
-    switch (object->kind) {
-    case JSON_OBJECT_STRING:
-        DS_FREE(NULL, object->string);
-        break;
-    case JSON_OBJECT_NUMBER:
-        break;
-    case JSON_OBJECT_BOOLEAN:
-        break;
-    case JSON_OBJECT_NULL:
-        break;
-    case JSON_OBJECT_ARRAY:
-        for (int i = 0; i < object->array.count; i++) {
-            json_object *item = NULL;
-            if (ds_dynamic_array_get_ref(&object->array, i, (void **)&item) != 0) {
-                DS_LOG_ERROR("Failed to get item from array");
-                return_defer(1);
-            }
-
-            if (json_object_free(item) != 0) {
-                DS_LOG_ERROR("Failed to free json object");
-                return_defer(1);
-            }
-        }
-        ds_dynamic_array_free(&object->array);
-        break;
-    case JSON_OBJECT_MAP:
-        for (int i = 0; i < object->map.capacity; i++) {
-            ds_dynamic_array bucket = object->map.buckets[i];
-
-            for (int j = 0; j < bucket.count; j++) {
-                ds_hashmap_kv kv = {0};
-                if (ds_dynamic_array_get(&bucket, j, &kv) != 0) {
-                    DS_LOG_ERROR("Failed to get item from array");
-                    return_defer(1);
-                }
-
-                DS_FREE(NULL, kv.key);
-                if (json_object_free(kv.value) != 0) {
-                    DS_LOG_ERROR("Failed to free json object");
-                    return_defer(1);
-                }
-                DS_FREE(NULL, kv.value);
-            }
-        }
-        ds_hashmap_free(&object->map);
-        break;
-    }
-
-defer:
-    return result;
-}
-
-typedef struct json_parser {
-    json_lexer lexer;
-} json_parser;
-
-int json_parser_init(json_parser *parser, json_lexer lexer);
-int json_parser_parse(json_parser *parser, json_object *object);
-void json_parser_free(json_parser *parser);
-
-int json_parser_init(json_parser *parser, json_lexer lexer) {
+static int json_parser_init(json_parser *parser, json_lexer lexer) {
     parser->lexer = lexer;
 
     return 0;
@@ -520,7 +402,7 @@ static int json_parser_parse_map(json_parser *parser, json_object *object) {
     json_token token = {0};
 
     object->kind = JSON_OBJECT_MAP;
-    ds_hashmap_init(&object->map, MAX_CAPACITY, json_object_hash, json_object_compare);
+    ds_hashmap_init(&object->map, JSON_OBJECT_MAP_MAX_CAPACITY, json_object_hash, json_object_compare);
 
     if (json_lexer_next(&parser->lexer, &token) != 0) {
         DS_LOG_ERROR("Failed to get the next token");
@@ -649,7 +531,7 @@ defer:
     return result;
 }
 
-int json_parser_parse(json_parser *parser, json_object *object) {
+static int json_parser_parse(json_parser *parser, json_object *object) {
     int result = 0;
     json_token token = {0};
 
@@ -674,7 +556,66 @@ defer:
     return result;
 }
 
-void json_parser_free(json_parser *parser) { }
+static void json_parser_free(json_parser *parser) { }
+
+static int json_object_debug_indent(json_object *object, int indent) {
+    int result = 0;
+
+    switch (object->kind) {
+    case JSON_OBJECT_STRING:
+        printf("%*s[STRING]: \'%s\'\n", indent, "", object->string);
+        break;
+    case JSON_OBJECT_NUMBER:
+        printf("%*s[NUMBER]: %f\n", indent, "", object->number);
+        break;
+    case JSON_OBJECT_BOOLEAN:
+        printf("%*s[BOOLEAN]: %s\n", indent, "", object->boolean == true ? "true" : "false");
+        break;
+    case JSON_OBJECT_NULL:
+        printf("%*s[NULL]\n", indent, "");
+        break;
+    case JSON_OBJECT_ARRAY:
+        printf("%*s[ARRAY]: [\n", indent, "");
+        for (int i = 0; i < object->array.count; i++) {
+            json_object item = {0};
+            if (ds_dynamic_array_get(&object->array, i, &item) != 0) {
+                DS_LOG_ERROR("Failed to get item from array");
+                return_defer(1);
+            }
+
+            if (json_object_debug_indent(&item, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
+                return_defer(1);
+            }
+        }
+        printf("%*s]\n", indent, "");
+        break;
+    case JSON_OBJECT_MAP:
+        printf("%*s[MAP]: {\n", indent, "");
+        for (int i = 0; i < object->map.capacity; i++) {
+            ds_dynamic_array bucket = object->map.buckets[i];
+
+            for (int j = 0; j < bucket.count; j++) {
+                ds_hashmap_kv kv = {0};
+                if (ds_dynamic_array_get(&bucket, j, &kv) != 0) {
+                    DS_LOG_ERROR("Failed to get item from array");
+                    return_defer(1);
+                }
+
+                printf("%*s[KEY]: \'%s\'\n", indent, "", (char *)kv.key);
+                if (json_object_debug_indent((json_object*)kv.value, indent + JSON_OBJECT_DUMP_INDENT) != 0) {
+                    return_defer(1);
+                }
+            }
+        }
+        printf("%*s}\n", indent, "");
+        break;
+    }
+
+defer:
+    return result;
+}
+
+/* PUBLIC */
 
 int json_object_load(char *buffer, unsigned int buffer_len, json_object *object) {
     int result = 0;
@@ -694,6 +635,67 @@ defer:
     json_lexer_free(&lexer);
     return result;
 }
+
+int json_object_debug(json_object *object) {
+    return json_object_debug_indent(object, 0);
+}
+
+int json_object_free(json_object *object) {
+    int result = 0;
+
+    switch (object->kind) {
+    case JSON_OBJECT_STRING:
+        DS_FREE(NULL, object->string);
+        break;
+    case JSON_OBJECT_NUMBER:
+        break;
+    case JSON_OBJECT_BOOLEAN:
+        break;
+    case JSON_OBJECT_NULL:
+        break;
+    case JSON_OBJECT_ARRAY:
+        for (int i = 0; i < object->array.count; i++) {
+            json_object *item = NULL;
+            if (ds_dynamic_array_get_ref(&object->array, i, (void **)&item) != 0) {
+                DS_LOG_ERROR("Failed to get item from array");
+                return_defer(1);
+            }
+
+            if (json_object_free(item) != 0) {
+                DS_LOG_ERROR("Failed to free json object");
+                return_defer(1);
+            }
+        }
+        ds_dynamic_array_free(&object->array);
+        break;
+    case JSON_OBJECT_MAP:
+        for (int i = 0; i < object->map.capacity; i++) {
+            ds_dynamic_array bucket = object->map.buckets[i];
+
+            for (int j = 0; j < bucket.count; j++) {
+                ds_hashmap_kv kv = {0};
+                if (ds_dynamic_array_get(&bucket, j, &kv) != 0) {
+                    DS_LOG_ERROR("Failed to get item from array");
+                    return_defer(1);
+                }
+
+                DS_FREE(NULL, kv.key);
+                if (json_object_free(kv.value) != 0) {
+                    DS_LOG_ERROR("Failed to free json object");
+                    return_defer(1);
+                }
+                DS_FREE(NULL, kv.value);
+            }
+        }
+        ds_hashmap_free(&object->map);
+        break;
+    }
+
+defer:
+    return result;
+}
+
+/* EXAMPLE */
 
 static int argparse(int argc, char **argv, char **filename) {
     int result = 0;
