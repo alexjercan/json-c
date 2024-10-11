@@ -7,10 +7,6 @@
 #define DS_DA_IMPLEMENTATION
 #include "ds.h"
 
-typedef int bool;
-const bool true = 1;
-const bool false = 0;
-
 typedef enum json_token_kind {
     JSON_TOKEN_LBRACE,
     JSON_TOKEN_RBRACE,
@@ -740,7 +736,7 @@ int main(int argc, char **argv) {
         return_defer(1);
     }
 
-    buffer_len = ds_io_read_file(filename, &buffer);
+    buffer_len = ds_io_read(filename, &buffer, "r");
     if (buffer_len < 0) {
         DS_LOG_ERROR("Failed to read from file: %s", (filename == NULL) ? "stdin" : filename);
         return_defer(-1);
