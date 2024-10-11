@@ -36,6 +36,7 @@ int main(int argc, char **argv) {
     int result = 0;
     char *filename = NULL;
     char *buffer = NULL;
+    char *string = NULL;
     int buffer_len;
     json_object object = {0};
 
@@ -55,15 +56,20 @@ int main(int argc, char **argv) {
         return_defer(1);
     }
 
-    if (json_object_debug(&object) != 0) {
+    if (json_object_dump(&object, &string) != 0) {
         DS_LOG_ERROR("Failed to dump json");
         return_defer(1);
     }
+
+    printf("%s", string);
 
 defer:
     json_object_free(&object);
     if (buffer != NULL) {
         DS_FREE(NULL, buffer);
+    }
+    if (string != NULL) {
+        DS_FREE(NULL, string);
     }
     return result;
 }
